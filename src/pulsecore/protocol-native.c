@@ -55,6 +55,8 @@
 #include <pulsecore/core-util.h>
 #include <pulsecore/ipacl.h>
 #include <pulsecore/thread-mq.h>
+#include <pulsecore/core-format.h>
+#include <pulsecore/transcode.h>
 
 #include "protocol-native.h"
 
@@ -143,6 +145,8 @@ typedef struct playback_stream {
     size_t render_memblockq_length;
     pa_usec_t current_sink_latency;
     uint64_t playing_for, underrun_for;
+    
+    pa_transcode transcode; 
 } playback_stream;
 
 #define PLAYBACK_STREAM(o) (playback_stream_cast(o))
@@ -791,6 +795,9 @@ static void playback_stream_free(pa_object* o) {
     pa_assert(s);
 
     playback_stream_unlink(s);
+    
+    if(s->transcode.encoding != -1)
+         pa_transcode_free(&s->transcode);
 
     pa_memblockq_free(s->memblockq);
     pa_xfree(s);
@@ -1110,8 +1117,11 @@ static playback_stream* playback_stream_new(
     uint32_t idx;
     int64_t start_index;
     pa_sink_input_new_data data;
-    char *memblockq_name;
-
+    char *memblockq_name;    
+    pa_encoding_t transcode_encoding = -1;
+    pa_format_info *f_in, *transcode_format_info;
+    uint32_t j;
+    
     pa_assert(c);
     pa_assert(ss);
     pa_assert(missing);
@@ -1145,17 +1155,52 @@ static playback_stream* playback_stream_new(
     data.driver = __FILE__;
     data.module = c->options->module;
     data.client = c->client;
-    if (sink)
-        pa_sink_input_new_data_set_sink(&data, sink, false);
+         
     if (pa_sample_spec_valid(ss))
         pa_sink_input_new_data_set_sample_spec(&data, ss);
     if (pa_channel_map_valid(map))
         pa_sink_input_new_data_set_channel_map(&data, map);
+    
+    if (!sink){
+        sink = pa_namereg_get(c->protocol->core, NULL, PA_NAMEREG_SINK);
+    }
+    
     if (formats) {
         pa_sink_input_new_data_set_formats(&data, formats);
         /* Ownership transferred to new_data, so we don't free it ourselves */
         formats = NULL;
     }
+    
+    *ret = pa_sink_input_new_data_set_sink(&data, sink, false);
+
+    if(*ret == false)
+    {                  
+         PA_IDXSET_FOREACH(f_in, data.req_formats, j) {
+              if(pa_transcode_supported(f_in->encoding)){
+
+                       transcode_encoding = f_in->encoding;
+                       
+                       f_in->encoding = PA_ENCODING_PCM;
+
+                       pa_sink_input_new_data_set_sink(&data, sink, false);
+                       
+                       #ifdef PROTOCOL_NATIVE_DEBUG
+                           pa_log("enabling transcoding");
+                       #endif
+                       
+                       transcode_format_info = pa_format_info_copy(f_in);
+                       
+                       break;
+              }
+         }
+    }     
+        
+
+        
+        
+         
+         
+
     if (volume) {
         pa_sink_input_new_data_set_volume(&data, volume);
         data.volume_is_absolute = !relative_volume;
@@ -1189,7 +1234,13 @@ static playback_stream* playback_stream_new(
     s->early_requests = early_requests;
     pa_atomic_store(&s->seek_or_post_in_queue, 0);
     s->seek_windex = -1;
-
+        
+    s->transcode.encoding = transcode_encoding;
+    if(transcode_encoding != -1) {
+         pa_transcode_init(&s->transcode, transcode_encoding, PA_TRANSCODE_DECODER, transcode_format_info, NULL);
+         pa_format_info_free(transcode_format_info);
+     }
+         
     s->sink_input->parent.process_msg = sink_input_process_msg;
     s->sink_input->pop = sink_input_pop_cb;
     s->sink_input->process_underrun = sink_input_process_underrun_cb;
@@ -1458,6 +1509,10 @@ static int sink_input_process_msg(pa_msgobject *o, int code, void *userdata, int
     pa_sink_input *i = PA_SINK_INPUT(o);
     playback_stream *s;
 
+    struct pa_memchunk transcode_chunk;
+    void *input_encoded_bytes, *output_pcm_bytes;
+    int32_t frame_size;
+
     pa_sink_input_assert_ref(i);
     s = PLAYBACK_STREAM(i->userdata);
     playback_stream_assert_ref(s);
@@ -1477,11 +1532,38 @@ static int sink_input_process_msg(pa_msgobject *o, int code, void *userdata, int
                 windex = PA_MIN(windex, pa_memblockq_get_write_index(s->memblockq));
             }
 
-            if (chunk && pa_memblockq_push_align(s->memblockq, chunk) < 0) {
-                if (pa_log_ratelimit(PA_LOG_WARN))
-                    pa_log_warn("Failed to push data into queue");
-                pa_asyncmsgq_post(pa_thread_mq_get()->outq, PA_MSGOBJECT(s), PLAYBACK_STREAM_MESSAGE_OVERFLOW, NULL, 0, NULL, NULL);
-                pa_memblockq_seek(s->memblockq, (int64_t) chunk->length, PA_SEEK_RELATIVE, true);
+            if(s->transcode.encoding != -1) {                 
+                input_encoded_bytes = pa_memblock_acquire(chunk->memblock);
+                transcode_chunk.memblock = pa_memblock_new( pa_memblock_get_pool(chunk->memblock), s->transcode.max_frame_size*s->transcode.channels*s->transcode.sample_size);
+                transcode_chunk.index = transcode_chunk.length = 0;
+                 
+                output_pcm_bytes = pa_memblock_acquire(transcode_chunk.memblock);
+
+                frame_size = pa_transcode_decode(&s->transcode, input_encoded_bytes, chunk->length, output_pcm_bytes);         
+                transcode_chunk.length = frame_size*s->transcode.channels*s->transcode.sample_size;
+
+                pa_log_info("transcode: decoded frame (framesize: %d total length: %d)", frame_size, (int)transcode_chunk.length);
+
+                pa_memblock_release(chunk->memblock);
+                pa_memblock_release(transcode_chunk.memblock);
+                                          
+                        
+                if (pa_memblockq_push_align(s->memblockq, &transcode_chunk) < 0) {
+                     if (pa_log_ratelimit(PA_LOG_WARN))
+                         pa_log_warn("Failed to push data into queue");
+                     pa_asyncmsgq_post(pa_thread_mq_get()->outq, PA_MSGOBJECT(s), PLAYBACK_STREAM_MESSAGE_OVERFLOW, NULL, 0, NULL, NULL);
+                     pa_memblockq_seek(s->memblockq, (int64_t) transcode_chunk.length, PA_SEEK_RELATIVE, true);
+                 }
+                 pa_memblock_unref(transcode_chunk.memblock);          
+                 
+            }
+            else {
+                     if (chunk && pa_memblockq_push_align(s->memblockq, chunk) < 0) {
+                         if (pa_log_ratelimit(PA_LOG_WARN))
+                             pa_log_warn("Failed to push data into queue");
+                         pa_asyncmsgq_post(pa_thread_mq_get()->outq, PA_MSGOBJECT(s), PLAYBACK_STREAM_MESSAGE_OVERFLOW, NULL, 0, NULL, NULL);
+                         pa_memblockq_seek(s->memblockq, (int64_t) chunk->length, PA_SEEK_RELATIVE, true);
+                 }
             }
 
             /* If more data is in queue, we rewind later instead. */
@@ -4921,7 +5003,7 @@ static void pstream_memblock_callback(pa_pstream *p, uint32_t channel, int64_t o
         playback_stream *ps = PLAYBACK_STREAM(stream);
 
         size_t frame_size = pa_frame_size(&ps->sink_input->sample_spec);
-        if (chunk->index % frame_size != 0 || chunk->length % frame_size != 0) {
+        if ((ps->transcode.encoding == -1) && (chunk->index % frame_size != 0 || chunk->length % frame_size != 0)) {
             pa_log_warn("Client sent non-aligned memblock: index %d, length %d, frame size: %d",
                         (int) chunk->index, (int) chunk->length, (int) frame_size);
             return;

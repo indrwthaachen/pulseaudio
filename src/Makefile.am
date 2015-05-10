@@ -967,7 +967,8 @@ libpulsecore_@PA_MAJORMINOR@_la_SOURCES = \
 		pulsecore/source.c pulsecore/source.h \
 		pulsecore/start-child.c pulsecore/start-child.h \
 		pulsecore/thread-mq.c pulsecore/thread-mq.h \
-		pulsecore/database.h
+		pulsecore/database.h \
+		pulsecore/transcode.c pulsecore/transcode.h
 
 libpulsecore_@PA_MAJORMINOR@_la_CFLAGS = $(AM_CFLAGS) $(SERVER_CFLAGS) $(LIBSNDFILE_CFLAGS) $(WINSOCK_CFLAGS)
 libpulsecore_@PA_MAJORMINOR@_la_LDFLAGS = $(AM_LDFLAGS) -avoid-version
@@ -1038,6 +1039,11 @@ if HAVE_LIBSAMPLERATE
 libpulsecore_@PA_MAJORMINOR@_la_SOURCES += pulsecore/resampler/libsamplerate.c
 libpulsecore_@PA_MAJORMINOR@_la_CFLAGS += $(LIBSAMPLERATE_CFLAGS)
 libpulsecore_@PA_MAJORMINOR@_la_LIBADD += $(LIBSAMPLERATE_LIBS)
+endif
+
+if HAVE_OPUS
+libpulsecore_@PA_MAJORMINOR@_la_CFLAGS += $(LIBOPUS_CFLAGS)
+libpulsecore_@PA_MAJORMINOR@_la_LIBADD += $(LIBOPUS_LIBS)
 endif
 
 # We split the foreign code off to not be annoyed by warnings we don't care about

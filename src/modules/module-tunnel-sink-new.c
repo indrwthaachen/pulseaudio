@@ -39,6 +39,8 @@
 #include <pulsecore/thread-mq.h>
 #include <pulsecore/poll.h>
 #include <pulsecore/proplist-util.h>
+#include <pulsecore/transcode.h>
+
 
 #include "module-tunnel-sink-new-symdef.h"
 
@@ -56,6 +58,7 @@ PA_MODULE_USAGE(
         "rate=<sample rate> "
         "channel_map=<channel map> "
         "cookie=<cookie file path>"
+        "compression=<compression format> "
         );
 
 #define MAX_LATENCY_USEC (200 * PA_USEC_PER_MSEC)
@@ -85,6 +88,8 @@ struct userdata {
     char *cookie_file;
     char *remote_server;
     char *remote_sink_name;
+    
+    pa_transcode transcode;
 };
 
 static const char* const valid_modargs[] = {
@@ -97,6 +102,7 @@ static const char* const valid_modargs[] = {
     "rate",
     "channel_map",
     "cookie",
+    "compression",
    /* "reconnect", reconnect if server comes back again - unimplemented */
     NULL,
 };
@@ -193,28 +199,67 @@ static void thread_func(void *userdata) {
 
             writable = pa_stream_writable_size(u->stream);
             if (writable > 0) {
-                pa_memchunk memchunk;
-                const void *p;
+            
+                if(u->transcode.encoding != -1) {
+                         pa_memchunk memchunk;
+                         const void *p;
+                         size_t nbBytes;
+                         unsigned char *cbits;
+                         
+                         pa_sink_render_full(u->sink, u->transcode.frame_size*u->transcode.channels*u->transcode.sample_size, &memchunk);
+                           
+                         pa_assert(memchunk.length > 0);
+                         pa_assert(memchunk.length >=  u->transcode.frame_size*u->transcode.channels);
+                         
+                         
+                         pa_log_debug("received memchunk length: %d bytes", memchunk.length );
+                         /* we have new data to write */
+                         p = pa_memblock_acquire(memchunk.memblock);
+   
+                         nbBytes = pa_transcode_encode(&u->transcode, (uint8_t*) p + memchunk.index, &cbits);
+                         pa_log_debug("encoded length: %d bytes", nbBytes);
+                                                        
+                         /* TODO: Use pa_stream_begin_write() to reduce copying. */
+                         ret = pa_stream_write_compressed(u->stream,
+                                               (uint8_t*) cbits,
+                                               nbBytes,
+                                               NULL,     /**< A cleanup routine for the data or NULL to request an internal copy */
+                                               0,        /** offset */
+                                              PA_SEEK_RELATIVE, u->transcode.frame_size*u->transcode.channels*u->transcode.sample_size);
+                         pa_memblock_release(memchunk.memblock);
+                         pa_memblock_unref(memchunk.memblock);
+                         if(nbBytes > 0) free(cbits);
+                         
+                         if (ret != 0) {
+                             pa_log_error("Could not write data into the stream ... ret = %i", ret);
+                             u->thread_mainloop_api->quit(u->thread_mainloop_api, TUNNEL_THREAD_FAILED_MAINLOOP);
+                         }
+                }
+                else { 
+                         pa_memchunk memchunk;
+                         const void *p;
 
-                pa_sink_render_full(u->sink, writable, &memchunk);
+                         pa_sink_render_full(u->sink, writable, &memchunk);
 
-                pa_assert(memchunk.length > 0);
+                         pa_assert(memchunk.length > 0);
 
-                /* we have new data to write */
-                p = pa_memblock_acquire(memchunk.memblock);
-                /* TODO: Use pa_stream_begin_write() to reduce copying. */
-                ret = pa_stream_write(u->stream,
-                                      (uint8_t*) p + memchunk.index,
-                                      memchunk.length,
-                                      NULL,     /**< A cleanup routine for the data or NULL to request an internal copy */
-                                      0,        /** offset */
-                                      PA_SEEK_RELATIVE);
-                pa_memblock_release(memchunk.memblock);
-                pa_memblock_unref(memchunk.memblock);
+                         /* we have new data to write */
+                         p = pa_memblock_acquire(memchunk.memblock);
+                         /* TODO: Use pa_stream_begin_write() to reduce copying. */
+                         ret = pa_stream_write(u->stream,
+                                               (uint8_t*) p + memchunk.index,
+                                               memchunk.length,
+                                               NULL,     /**< A cleanup routine for the data or NULL to request an internal copy */
+                                               0,        /** offset */
+                                               PA_SEEK_RELATIVE);
+                         pa_memblock_release(memchunk.memblock);
+                         pa_memblock_unref(memchunk.memblock);
 
-                if (ret != 0) {
-                    pa_log_error("Could not write data into the stream ... ret = %i", ret);
-                    u->thread_mainloop_api->quit(u->thread_mainloop_api, TUNNEL_THREAD_FAILED_MAINLOOP);
+                         if (ret != 0) {
+                             pa_log_error("Could not write data into the stream ... ret = %i", ret);
+                             u->thread_mainloop_api->quit(u->thread_mainloop_api, TUNNEL_THREAD_FAILED_MAINLOOP);
+                         }
+                
                 }
 
             }
@@ -312,7 +357,24 @@ static void context_state_cb(pa_context *c, void *userdata) {
             pa_assert(!u->stream);
 
             proplist = tunnel_new_proplist(u);
-            u->stream = pa_stream_new_with_proplist(u->context,
+            
+            if(u->transcode.encoding != -1) {
+            
+                  unsigned int n_formats = 1;
+                  pa_format_info *formats[1];
+  
+                  formats[0] = pa_format_info_new();
+                  formats[0]->encoding = u->transcode.encoding;
+                  pa_format_info_set_sample_format(formats[0], u->sink->sample_spec.format);
+                  pa_format_info_set_rate(formats[0], u->sink->sample_spec.rate);
+                  pa_format_info_set_channels(formats[0], u->sink->sample_spec.channels);
+                  pa_format_info_set_channel_map(formats[0],  &u->sink->channel_map);
+
+                  u->stream = pa_stream_new_extended(u->context, stream_name, formats, n_formats, proplist);                             
+                       
+            }
+            else
+                  u->stream = pa_stream_new_with_proplist(u->context,
                                                     stream_name,
                                                     &u->sink->sample_spec,
                                                     &u->sink->channel_map,
@@ -461,6 +523,7 @@ int pa__init(pa_module *m) {
     pa_channel_map map;
     const char *remote_server = NULL;
     const char *sink_name = NULL;
+    const char *compression = NULL;
     char *default_sink_name = NULL;
 
     pa_assert(m);
@@ -507,6 +570,15 @@ int pa__init(pa_module *m) {
     default_sink_name = pa_sprintf_malloc("tunnel-sink-new.%s", remote_server);
     sink_name = pa_modargs_get_value(ma, "sink_name", default_sink_name);
 
+    compression = pa_modargs_get_value(ma, "compression", NULL);
+    if (compression) {
+        pa_log("compression activated");
+        if(strcmp(compression, "opus") == 0 && pa_transcode_supported(PA_ENCODING_OPUS)){
+             pa_transcode_init(&u->transcode, PA_ENCODING_OPUS, PA_TRANSCODE_ENCODER, NULL, &ss);
+         }        
+    }
+    else u->transcode.encoding = -1;
+        
     pa_sink_new_data_set_name(&sink_data, sink_name);
     pa_sink_new_data_set_sample_spec(&sink_data, &ss);
     pa_sink_new_data_set_channel_map(&sink_data, &map);
@@ -596,6 +668,10 @@ void pa__done(pa_module *m) {
 
     if (u->sink)
         pa_sink_unref(u->sink);
+        
+     if(u->transcode.encoding != -1)
+         pa_transcode_free(&u->transcode);
 
     pa_xfree(u);
 }
+

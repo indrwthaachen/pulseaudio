@@ -1462,14 +1462,14 @@ int pa_stream_cancel_write(
     return 0;
 }
 
-int pa_stream_write_ext_free(
+int pa_stream_write_ext_compressed_free(
         pa_stream *s,
         const void *data,
         size_t length,
         pa_free_cb_t free_cb,
         void *free_cb_data,
         int64_t offset,
-        pa_seek_mode_t seek) {
+        pa_seek_mode_t seek, size_t decoded_length) {
 
     pa_assert(s);
     pa_assert(PA_REFCNT_VALUE(s) >= 1);
@@ -1486,7 +1486,9 @@ int pa_stream_write_ext_free(
                        ((const char*) data + length <= (const char*) s->write_data + pa_memblock_get_length(s->write_memblock))),
                       PA_ERR_INVALID);
     PA_CHECK_VALIDITY(s->context, offset % pa_frame_size(&s->sample_spec) == 0, PA_ERR_INVALID);
-    PA_CHECK_VALIDITY(s->context, length % pa_frame_size(&s->sample_spec) == 0, PA_ERR_INVALID);
+    if(decoded_length==0) {
+         PA_CHECK_VALIDITY(s->context, length % pa_frame_size(&s->sample_spec) == 0, PA_ERR_INVALID);
+    }
     PA_CHECK_VALIDITY(s->context, !free_cb || !s->write_memblock, PA_ERR_INVALID);
 
     if (s->write_memblock) {
@@ -1548,6 +1550,10 @@ int pa_stream_write_ext_free(
             free_cb(free_cb_data);
     }
 
+    /* use uncompressed length in the following */
+    if(decoded_length != 0) 
+         length = decoded_length;
+         
     /* This is obviously wrong since we ignore the seeking index . But
      * that's OK, the server side applies the same error */
     s->requested_bytes -= (seek == PA_SEEK_RELATIVE ? offset : 0) + (int64_t) length;
@@ -1592,6 +1598,18 @@ int pa_stream_write_ext_free(
     return 0;
 }
 
+int pa_stream_write_ext_free(
+        pa_stream *s,
+        const void *data,
+        size_t length,
+        pa_free_cb_t free_cb,
+        void *free_cb_data,
+        int64_t offset,
+        pa_seek_mode_t seek) {
+        
+    return pa_stream_write_ext_compressed_free(s, data, length, free_cb, (void*) data, offset, seek, 0);
+}
+
 int pa_stream_write(
         pa_stream *s,
         const void *data,
@@ -1600,7 +1618,19 @@ int pa_stream_write(
         int64_t offset,
         pa_seek_mode_t seek) {
 
-    return pa_stream_write_ext_free(s, data, length, free_cb, (void*) data, offset, seek);
+    return pa_stream_write_ext_compressed_free(s, data, length, free_cb, (void*) data, offset, seek, 0);
+}
+
+int pa_stream_write_compressed(
+        pa_stream *s,
+        const void *data,
+        size_t length,
+        pa_free_cb_t free_cb,
+        int64_t offset,
+        pa_seek_mode_t seek,
+        size_t decoded_length) {
+
+    return pa_stream_write_ext_compressed_free(s, data, length, free_cb, (void*) data, offset, seek, decoded_length);
 }
 
 int pa_stream_peek(pa_stream *s, const void **data, size_t *length) {
