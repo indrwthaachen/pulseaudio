@@ -18,6 +18,7 @@ typedef struct pa_transcode {
  uint32_t max_frame_size;
  uint32_t sample_size;
  uint32_t rate;
+ uint32_t bitrate;
  pa_transcode_flags_t flags;
  union {
          void *decoder;
@@ -26,7 +27,7 @@ typedef struct pa_transcode {
 } pa_transcode;
 
 bool pa_transcode_supported(pa_encoding_t encoding);
-void *pa_transcode_create_decoder(pa_encoding_t encoding);
+void pa_transcode_set_format_info(pa_transcode *transcode, pa_format_info *f);
 void pa_transcode_init(pa_transcode *transcode, pa_encoding_t encoding, pa_transcode_flags_t flags, pa_format_info *transcode_format_info, pa_sample_spec *transcode_sink_spec);
 void pa_transcode_free(pa_transcode *transcode);
 int32_t pa_transcode_encode(pa_transcode *transcode, unsigned char *pcm_input, unsigned char **compressed_output);

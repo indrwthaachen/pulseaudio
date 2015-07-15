@@ -59,6 +59,8 @@ PA_MODULE_USAGE(
         "channel_map=<channel map> "
         "cookie=<cookie file path>"
         "compression=<compression format> "
+        "compression_frame_size=<frame_size of compression (opus: 120, 240, 480, 960, 1920, 2880)> "
+        "compression_bitrate=<bitrate of compression> "
         );
 
 #define MAX_LATENCY_USEC (200 * PA_USEC_PER_MSEC)
@@ -103,6 +105,8 @@ static const char* const valid_modargs[] = {
     "channel_map",
     "cookie",
     "compression",
+    "compression-bitrate",
+    "compression-frame_size",
    /* "reconnect", reconnect if server comes back again - unimplemented */
     NULL,
 };
@@ -212,12 +216,12 @@ static void thread_func(void *userdata) {
                          pa_assert(memchunk.length >=  u->transcode.frame_size*u->transcode.channels);
                          
                          
-                         pa_log_debug("received memchunk length: %d bytes", memchunk.length );
+                         pa_log_debug("received memchunk length: %zu bytes", memchunk.length );
                          /* we have new data to write */
                          p = pa_memblock_acquire(memchunk.memblock);
    
                          nbBytes = pa_transcode_encode(&u->transcode, (uint8_t*) p + memchunk.index, &cbits);
-                         pa_log_debug("encoded length: %d bytes", nbBytes);
+                         pa_log_debug("encoded length: %zu bytes", nbBytes);
                                                         
                          /* TODO: Use pa_stream_begin_write() to reduce copying. */
                          ret = pa_stream_write_compressed(u->stream,
@@ -369,8 +373,9 @@ static void context_state_cb(pa_context *c, void *userdata) {
                   pa_format_info_set_rate(formats[0], u->sink->sample_spec.rate);
                   pa_format_info_set_channels(formats[0], u->sink->sample_spec.channels);
                   pa_format_info_set_channel_map(formats[0],  &u->sink->channel_map);
+                  pa_transcode_set_format_info(&u->transcode, formats[0]);
 
-                  u->stream = pa_stream_new_extended(u->context, stream_name, formats, n_formats, proplist);                             
+                  u->stream = pa_stream_new_extended(u->context, stream_name, formats, n_formats, proplist);
                        
             }
             else
@@ -573,9 +578,18 @@ int pa__init(pa_module *m) {
     compression = pa_modargs_get_value(ma, "compression", NULL);
     if (compression) {
         pa_log("compression activated");
+        memset(&u->transcode, 0, sizeof(pa_transcode));
+
         if(strcmp(compression, "opus") == 0 && pa_transcode_supported(PA_ENCODING_OPUS)){
+
+             compression = pa_modargs_get_value(ma, "compression-frame_size", NULL);
+             if(compression) u->transcode.frame_size = atoi(compression);
+             compression = pa_modargs_get_value(ma, "compression-bitrate", NULL);
+             if(compression) u->transcode.bitrate = atoi(compression);
+
              pa_transcode_init(&u->transcode, PA_ENCODING_OPUS, PA_TRANSCODE_ENCODER, NULL, &ss);
-         }        
+
+         }
     }
     else u->transcode.encoding = -1;
         

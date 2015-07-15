@@ -1532,14 +1532,14 @@ static int sink_input_process_msg(pa_msgobject *o, int code, void *userdata, int
                 windex = PA_MIN(windex, pa_memblockq_get_write_index(s->memblockq));
             }
 
-            if(s->transcode.encoding != -1) {                 
+            if(s->transcode.encoding != -1) {
                 input_encoded_bytes = pa_memblock_acquire(chunk->memblock);
                 transcode_chunk.memblock = pa_memblock_new( pa_memblock_get_pool(chunk->memblock), s->transcode.max_frame_size*s->transcode.channels*s->transcode.sample_size);
                 transcode_chunk.index = transcode_chunk.length = 0;
                  
                 output_pcm_bytes = pa_memblock_acquire(transcode_chunk.memblock);
 
-                frame_size = pa_transcode_decode(&s->transcode, input_encoded_bytes, chunk->length, output_pcm_bytes);         
+                frame_size = pa_transcode_decode(&s->transcode, input_encoded_bytes, chunk->length, output_pcm_bytes);
                 transcode_chunk.length = frame_size*s->transcode.channels*s->transcode.sample_size;
 
                 pa_log_info("transcode: decoded frame (framesize: %d total length: %d)", frame_size, (int)transcode_chunk.length);
@@ -1554,7 +1554,7 @@ static int sink_input_process_msg(pa_msgobject *o, int code, void *userdata, int
                      pa_asyncmsgq_post(pa_thread_mq_get()->outq, PA_MSGOBJECT(s), PLAYBACK_STREAM_MESSAGE_OVERFLOW, NULL, 0, NULL, NULL);
                      pa_memblockq_seek(s->memblockq, (int64_t) transcode_chunk.length, PA_SEEK_RELATIVE, true);
                  }
-                 pa_memblock_unref(transcode_chunk.memblock);          
+                 pa_memblock_unref(transcode_chunk.memblock);
                  
             }
             else {
